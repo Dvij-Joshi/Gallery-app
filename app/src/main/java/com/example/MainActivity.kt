@@ -18,6 +18,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // Configure Coil globally to decode video thumbnails out of the box
+        val imageLoader = coil.ImageLoader.Builder(applicationContext)
+            .components {
+                add(coil.decode.VideoFrameDecoder.Factory())
+            }
+            .crossfade(true)
+            .build()
+        coil.Coil.setImageLoader(imageLoader)
+
         // Supports full edge-to-edge transparent rendering across physical device notch regions
         enableEdgeToEdge()
 

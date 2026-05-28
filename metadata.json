@@ -1,5 +1,5 @@
 {
-  "name": "Minimal Gallery",
+  "name": "Memories",
   "description": "A dark/light minimal offline-first gallery app featuring 120 FPS swiping, fast scrollbars, adaptive layouts, and smooth-release pinch gestures.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

@@ -45,7 +45,7 @@ object SampleMedia {
                 name = "Golden Mountain Peak.jpg",
                 isVideo = false,
                 dateAdded = now - (2 * oneDay),
-                folderName = "Nature"
+                folderName = "Camera"
             ),
             MediaItem(
                 id = "s_nat_2",
@@ -53,7 +53,7 @@ object SampleMedia {
                 name = "Mist Over Forest Canopy.jpg",
                 isVideo = false,
                 dateAdded = now - (5 * oneDay),
-                folderName = "Nature"
+                folderName = "Camera"
             ),
             MediaItem(
                 id = "s_nat_3",
@@ -61,7 +61,7 @@ object SampleMedia {
                 name = "Wooden Bridge in Woodland.jpg",
                 isVideo = false,
                 dateAdded = now - (15 * oneDay),
-                folderName = "Nature"
+                folderName = "Camera"
             ),
 
             // --- Videos ---
@@ -72,7 +72,7 @@ object SampleMedia {
                 isVideo = true,
                 duration = "0:15",
                 dateAdded = now - (12 * oneDay),
-                folderName = "Videos"
+                folderName = "Camera"
             ),
             MediaItem(
                 id = "s_vid_2",
@@ -100,7 +100,7 @@ object SampleMedia {
                 name = "Tokyo Midnight Neon.jpg",
                 isVideo = false,
                 dateAdded = now - (35 * oneDay),
-                folderName = "Urban Noir"
+                folderName = "Camera"
             ),
             MediaItem(
                 id = "s_urb_2",

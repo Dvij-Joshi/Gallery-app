@@ -15,10 +15,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -26,6 +28,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -57,6 +60,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
@@ -146,9 +150,16 @@ fun GalleryMainScreen(
     val albums by viewModel.albums.collectAsState()
     val showSamplesOnly by viewModel.showSamplesOnly.collectAsState()
 
-    // Screen navigation layout
+    // Selection mode state
+    val isSelectionMode by viewModel.isSelectionMode.collectAsState()
+    val selectedIds by viewModel.selectedIds.collectAsState()
+
+    var showCreateAlbumDialog by remember { mutableStateOf(false) }
+    var showDeleteSelectedConfirm by remember { mutableStateOf(false) }
+
+    // Screen navigation layout: reference raw folder name instead of snapshot so changes reflect live
     var activeViewerMedia by remember { mutableStateOf<MediaItem?>(null) }
-    var activeAlbumDetails by remember { mutableStateOf<Album?>(null) }
+    var activeAlbumName by remember { mutableStateOf<String?>(null) }
 
     // Double tab swipe setups using native HorizontalPager
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
@@ -162,10 +173,23 @@ fun GalleryMainScreen(
         vibrate(view)
     }
 
-    // Dynamic chronological flattening calculation
-    val cameraRollGridItems = remember(mediaItems) {
+    // Extract Camera Roll items only (folders named Camera or DCIM)
+    val cameraRollMedia = remember(mediaItems) {
+        val cameraFiltered = mediaItems.filter {
+            it.folderName.equals("Camera", ignoreCase = true) ||
+            it.folderName.equals("DCIM", ignoreCase = true)
+        }
+        if (cameraFiltered.isEmpty()) {
+            mediaItems
+        } else {
+            cameraFiltered
+        }
+    }
+
+    // Dynamic chronological flattening calculation for Camera Roll
+    val cameraRollGridItems = remember(cameraRollMedia) {
         val list = ArrayList<GridItem>()
-        val grouped = mediaItems.groupBy { it.monthYearString }
+        val grouped = cameraRollMedia.groupBy { it.monthYearString }
         grouped.forEach { (monthAndYear, items) ->
             list.add(GridItem.Header(monthAndYear))
             items.forEach { list.add(GridItem.Media(it)) }
@@ -177,15 +201,20 @@ fun GalleryMainScreen(
         vibrate(view)
     }
 
-    // Intercept physical back button to close overlays gracefully
-    BackHandler(enabled = activeViewerMedia != null) {
+    // Intercept physical back button to close overlays gracefully or clear selections
+    BackHandler(enabled = isSelectionMode) {
+        vibrate(view)
+        viewModel.clearSelection()
+    }
+
+    BackHandler(enabled = activeViewerMedia != null && !isSelectionMode) {
         vibrate(view)
         activeViewerMedia = null
     }
 
-    BackHandler(enabled = activeAlbumDetails != null && activeViewerMedia == null) {
+    BackHandler(enabled = activeAlbumName != null && activeViewerMedia == null && !isSelectionMode) {
         vibrate(view)
-        activeAlbumDetails = null
+        activeAlbumName = null
     }
 
     Box(
@@ -384,7 +413,22 @@ fun GalleryMainScreen(
                                 CameraRollView(
                                     gridItems = cameraRollGridItems,
                                     columns = columnsCount,
-                                    onMediaClick = { activeViewerMedia = it }
+                                    isSelectionModeActive = isSelectionMode,
+                                    selectedIds = selectedIds,
+                                    onMediaClick = { clicked ->
+                                        if (isSelectionMode) {
+                                            viewModel.toggleSelection(clicked.id)
+                                        } else {
+                                            activeViewerMedia = clicked
+                                        }
+                                    },
+                                    onMediaLongClick = { clicked ->
+                                        if (!isSelectionMode) {
+                                            viewModel.enterSelectionMode(clicked.id)
+                                        } else {
+                                            viewModel.toggleSelection(clicked.id)
+                                        }
+                                    }
                                 )
                             }
 
@@ -392,7 +436,9 @@ fun GalleryMainScreen(
                                 // Folders & Albums grid view
                                 AlbumsGridView(
                                     albums = albums,
-                                    onAlbumClick = { activeAlbumDetails = it }
+                                    onAlbumClick = { clickedAlbum ->
+                                        activeAlbumName = clickedAlbum.name
+                                    }
                                 )
                             }
                         }
@@ -403,7 +449,7 @@ fun GalleryMainScreen(
 
         // --- Slide-up detail screen for viewed folder folder ---
         AnimatedVisibility(
-            visible = activeAlbumDetails != null,
+            visible = activeAlbumName != null,
             enter = slideInVertically(
                 initialOffsetY = { it },
                 animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
@@ -413,16 +459,36 @@ fun GalleryMainScreen(
                 animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
             )
         ) {
-            activeAlbumDetails?.let { album ->
+            val currentAlbum = albums.find { it.name == activeAlbumName }
+            if (currentAlbum != null) {
                 AlbumDetailsOverlay(
-                    album = album,
+                    album = currentAlbum,
                     columns = columnsCount,
+                    isSelectionModeActive = isSelectionMode,
+                    selectedIds = selectedIds,
                     onBackClick = {
                         vibrate(view)
-                        activeAlbumDetails = null
+                        activeAlbumName = null
                     },
-                    onMediaClick = { activeViewerMedia = it }
+                    onMediaClick = { clicked ->
+                        if (isSelectionMode) {
+                            viewModel.toggleSelection(clicked.id)
+                        } else {
+                            activeViewerMedia = clicked
+                        }
+                    },
+                    onMediaLongClick = { clicked ->
+                        if (!isSelectionMode) {
+                            viewModel.enterSelectionMode(clicked.id)
+                        } else {
+                            viewModel.toggleSelection(clicked.id)
+                        }
+                    }
                 )
+            } else {
+                LaunchedEffect(Unit) {
+                    activeAlbumName = null
+                }
             }
         }
 
@@ -434,8 +500,9 @@ fun GalleryMainScreen(
         ) {
             activeViewerMedia?.let { clickedMedia ->
                 // Collect flat sequence context to enable left/right paging in active viewer
-                val flatMediaList = remember(activeAlbumDetails, mediaItems) {
-                    activeAlbumDetails?.items ?: mediaItems
+                val flatMediaList = remember(activeAlbumName, albums, cameraRollMedia) {
+                    val currentAlbum = albums.find { it.name == activeAlbumName }
+                    currentAlbum?.items ?: cameraRollMedia
                 }
                 
                 val favoriteIds by viewModel.favoriteIds.collectAsState()
@@ -454,6 +521,352 @@ fun GalleryMainScreen(
                 )
             }
         }
+
+        // --- MULTI-SELECT FLOATING ACTION BAR OVERLAY ---
+        AnimatedVisibility(
+            visible = isSelectionMode,
+            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 32.dp)
+                .navigationBarsPadding()
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f)
+                ),
+                shape = RoundedCornerShape(24.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    0.5.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                ),
+                elevation = CardDefaults.cardElevation(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "${selectedIds.size} SELECTED",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            letterSpacing = 1.2.sp
+                        )
+                        Text(
+                            text = "Actions for selected",
+                            fontSize = 9.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Create Album Button
+                        Button(
+                            onClick = {
+                                vibrate(view)
+                                showCreateAlbumDialog = true
+                            },
+                            shape = RoundedCornerShape(50),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Folder,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ADD ALBUM", fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+                        }
+
+                        // Share Button
+                        IconButton(
+                            onClick = {
+                                vibrate(view)
+                                val itemsToShare = mediaItems.filter { it.id in selectedIds }
+                                shareMediaItems(context, itemsToShare)
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        // Delete Button
+                        IconButton(
+                            onClick = {
+                                vibrate(view)
+                                showDeleteSelectedConfirm = true
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        // Close Button
+                        IconButton(
+                            onClick = {
+                                vibrate(view)
+                                viewModel.clearSelection()
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close selection mode",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- CUSTOM VIRTUAL ALBUM CREATION DIALOG OVERLAY ---
+        AnimatedVisibility(
+            visible = showCreateAlbumDialog,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            var albumNameInput by remember { mutableStateOf("") }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.75f))
+                    .clickable { showCreateAlbumDialog = false },
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(0.85f)
+                        .clickable(enabled = false) {}, // consume clicks to prevent backing out
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "CREATE ANOTHER ALBUM",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.5.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "A virtual folder containing the ${selectedIds.size} selected items will be created.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        
+                        // Compact input box
+                        androidx.compose.material3.OutlinedTextField(
+                            value = albumNameInput,
+                            onValueChange = { albumNameInput = it },
+                            placeholder = { Text("Album Name", fontSize = 13.sp) },
+                            textStyle = androidx.compose.ui.text.TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp),
+                            singleLine = true,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    vibrate(view)
+                                    showCreateAlbumDialog = false
+                                },
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                            ) {
+                                Text("CANCEL", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                            }
+                            Button(
+                                onClick = {
+                                    vibrate(view)
+                                    if (albumNameInput.isNotBlank()) {
+                                        viewModel.createVirtualAlbum(albumNameInput.trim(), selectedIds)
+                                        showCreateAlbumDialog = false
+                                    }
+                                },
+                                enabled = albumNameInput.isNotBlank(),
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                            ) {
+                                Text("MAKE", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- CUSTOM BATCH DELETE CONFIRMATION OVERLAY ---
+        AnimatedVisibility(
+            visible = showDeleteSelectedConfirm,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.75f))
+                    .clickable { showDeleteSelectedConfirm = false },
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                     modifier = Modifier
+                        .fillMaxWidth(0.85f)
+                        .clickable(enabled = false) {}, // consume clicks
+                     shape = RoundedCornerShape(16.dp),
+                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                     border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "DELETE SELECTED ITEMS?",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.5.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "This will remove all ${selectedIds.size} selected items from your current feed view.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    vibrate(view)
+                                    showDeleteSelectedConfirm = false
+                                },
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                            ) {
+                                Text("CANCEL", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                            }
+                            Button(
+                                onClick = {
+                                    vibrate(view)
+                                    viewModel.deleteSelectedMedia(selectedIds)
+                                    showDeleteSelectedConfirm = false
+                                },
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                            ) {
+                                Text("DELETE", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- Dynamic system share trigger utility ---
+fun shareMediaItems(context: android.content.Context, items: List<MediaItem>) {
+    if (items.isEmpty()) return
+    try {
+        val intent = if (items.size == 1) {
+            android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = if (items[0].isVideo) "video/*" else "image/*"
+                putExtra(android.content.Intent.EXTRA_STREAM, android.net.Uri.parse(items[0].uri))
+            }
+        } else {
+            android.content.Intent(android.content.Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                val uris = ArrayList<android.net.Uri>()
+                items.forEach { uris.add(android.net.Uri.parse(it.uri)) }
+                putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, uris)
+            }
+        }
+        intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(android.content.Intent.createChooser(intent, "Share media items"))
+    } catch (e: Exception) {
+        e.printStackTrace()
     }
 }
 
@@ -562,7 +975,10 @@ fun PermissionWelcomeView(
 fun CameraRollView(
     gridItems: List<GridItem>,
     columns: Int,
-    onMediaClick: (MediaItem) -> Unit
+    isSelectionModeActive: Boolean,
+    selectedIds: Set<String>,
+    onMediaClick: (MediaItem) -> Unit,
+    onMediaLongClick: (MediaItem) -> Unit
 ) {
     val lazyGridState = rememberLazyGridState()
     val scrollScope = rememberCoroutineScope()
@@ -594,18 +1010,75 @@ fun CameraRollView(
                         is GridItem.Media -> GridItemSpan(1)
                     }
                 }
-            ) { _, item ->
+            ) { idx, item ->
                 when (item) {
                     is GridItem.Header -> {
-                        MonthHeader(title = item.title)
+                        MonthSectionSeparator(title = item.title, showDivider = idx > 0)
                     }
 
                     is GridItem.Media -> {
                         MediaGridCard(
                             media = item.item,
-                            onClick = { onMediaClick(item.item) }
+                            isSelected = selectedIds.contains(item.item.id),
+                            isSelectionModeActive = isSelectionModeActive,
+                            onClick = { onMediaClick(item.item) },
+                            onLongClick = { onMediaLongClick(item.item) }
                         )
                     }
+                }
+            }
+        }
+
+        // --- FLOATING MONTH-YEAR INDICATOR ON SCROLL ---
+        val firstVisibleItemIndex by remember { derivedStateOf { lazyGridState.firstVisibleItemIndex } }
+        val currentMonthYear = remember(firstVisibleItemIndex, gridItems) {
+            if (gridItems.isNotEmpty() && firstVisibleItemIndex in gridItems.indices) {
+                when (val item = gridItems[firstVisibleItemIndex]) {
+                    is GridItem.Header -> item.title
+                    is GridItem.Media -> item.item.monthYearString
+                }
+            } else {
+                ""
+            }
+        }
+
+        AnimatedVisibility(
+            visible = (lazyGridState.isScrollInProgress || firstVisibleItemIndex > 0) && currentMonthYear.isNotEmpty(),
+            enter = fadeIn() + expandVertically(expandFrom = Alignment.Top),
+            exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Top),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 16.dp)
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f)
+                ),
+                shape = RoundedCornerShape(50),
+                border = androidx.compose.foundation.BorderStroke(
+                    0.5.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                ),
+                elevation = CardDefaults.cardElevation(4.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CalendarToday,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = currentMonthYear.uppercase(),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.5.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
         }
@@ -689,47 +1162,47 @@ private fun calculateScrollIndex(y: Float, containerHeight: Float, totalCount: I
 }
 
 @Composable
-fun MonthHeader(title: String) {
-    Text(
-        text = title.uppercase(Locale.getDefault()),
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Bold,
-        letterSpacing = 2.sp,
-        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+fun MonthSectionSeparator(
+    title: String,
+    showDivider: Boolean
+) {
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 8.dp, top = 24.dp, bottom = 8.dp)
-    )
+            .padding(start = 8.dp, end = 8.dp, top = if (showDivider) 36.dp else 16.dp, bottom = 4.dp)
+    ) {
+        if (showDivider) {
+            androidx.compose.material3.HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f),
+                thickness = 0.8.dp,
+                modifier = Modifier.padding(bottom = 20.dp)
+            )
+        }
+        Text(
+            text = title.uppercase(Locale.getDefault()),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 2.5.sp,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+    }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun MediaGridCard(
     media: MediaItem,
-    onClick: () -> Unit
+    isSelected: Boolean = false,
+    isSelectionModeActive: Boolean = false,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     val view = LocalView.current
-    var isVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        isVisible = true
-    }
-    val cardAlpha by animateFloatAsState(
-        targetValue = if (isVisible) 1f else 0f,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label = "card_alpha"
-    )
-    val cardOffsetY by animateFloatAsState(
-        targetValue = if (isVisible) 0f else 28f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "card_offset_y"
-    )
-
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val animatedScale by animateFloatAsState(
-        targetValue = if (isPressed) 0.92f else 1.0f,
+        targetValue = if (isPressed) 0.94f else 1.0f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMediumLow
@@ -741,22 +1214,25 @@ fun MediaGridCard(
         modifier = Modifier
             .aspectRatio(1f)
             .graphicsLayer {
-                alpha = cardAlpha
-                translationY = cardOffsetY
                 scaleX = animatedScale
                 scaleY = animatedScale
             }
-            .clip(RoundedCornerShape(4.dp))
-            .clickable(
+            .clip(RoundedCornerShape(8.dp))
+            .combinedClickable(
                 interactionSource = interactionSource,
-                indication = androidx.compose.foundation.LocalIndication.current
-            ) {
-                vibrate(view)
-                onClick()
-            },
+                indication = androidx.compose.foundation.LocalIndication.current,
+                onClick = {
+                    vibrate(view)
+                    onClick()
+                },
+                onLongClick = {
+                    vibrate(view)
+                    onLongClick()
+                }
+            ),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         elevation = CardDefaults.cardElevation(0.dp),
-        shape = RoundedCornerShape(4.dp)
+        shape = RoundedCornerShape(8.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             AsyncImage(
@@ -765,6 +1241,15 @@ fun MediaGridCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
+
+            // Dynamic dimming overlay when selected to highlight the checkmark
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.4f))
+                )
+            }
 
             // Video decoration overlays with dynamic transparent background
             if (media.isVideo) {
@@ -798,6 +1283,35 @@ fun MediaGridCard(
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
                     )
+                }
+            }
+
+            // Selection marker indicators (checkboxes) at the top-right corner
+            if (isSelectionModeActive) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .size(22.dp)
+                        .background(
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.4f),
+                            shape = CircleShape
+                        )
+                        .border(
+                            width = 1.5.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else Color.White,
+                            shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isSelected) {
+                        Text(
+                            text = "✓",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
         }
@@ -852,24 +1366,6 @@ fun AlbumFolderCard(
     onClick: () -> Unit
 ) {
     val view = LocalView.current
-    var isVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        isVisible = true
-    }
-    val cardAlpha by animateFloatAsState(
-        targetValue = if (isVisible) 1f else 0f,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label = "folder_alpha"
-    )
-    val cardOffsetY by animateFloatAsState(
-        targetValue = if (isVisible) 0f else 28f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "folder_offset_y"
-    )
-
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val animatedScale by animateFloatAsState(
@@ -885,8 +1381,6 @@ fun AlbumFolderCard(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
-                alpha = cardAlpha
-                translationY = cardOffsetY
                 scaleX = animatedScale
                 scaleY = animatedScale
             }
@@ -970,9 +1464,17 @@ fun AlbumFolderCard(
 fun AlbumDetailsOverlay(
     album: Album,
     columns: Int,
+    isSelectionModeActive: Boolean,
+    selectedIds: Set<String>,
     onBackClick: () -> Unit,
-    onMediaClick: (MediaItem) -> Unit
+    onMediaClick: (MediaItem) -> Unit,
+    onMediaLongClick: (MediaItem) -> Unit
 ) {
+    val lazyGridState = rememberLazyGridState()
+    val scrollScope = rememberCoroutineScope()
+    val view = LocalView.current
+    var lastVibratedSectionIndex by remember { mutableIntStateOf(-1) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1004,24 +1506,83 @@ fun AlbumDetailsOverlay(
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Text(
-                    text = "${album.itemsCount} elements in this folder",
+                    text = "${album.items.size} elements in this folder",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
                 )
             }
         }
 
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(columns),
-            contentPadding = PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
         ) {
-            itemsIndexed(album.items) { _, mediaItem ->
-                MediaGridCard(mediaItem, onClick = { onMediaClick(mediaItem) })
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                state = lazyGridState,
+                contentPadding = PaddingValues(top = 16.dp, start = 12.dp, end = 20.dp, bottom = 48.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                itemsIndexed(
+                    items = album.items,
+                    key = { _, item -> item.id }
+                ) { _, mediaItem ->
+                    MediaGridCard(
+                        media = mediaItem,
+                        isSelected = selectedIds.contains(mediaItem.id),
+                        isSelectionModeActive = isSelectionModeActive,
+                        onClick = { onMediaClick(mediaItem) },
+                        onLongClick = { onMediaLongClick(mediaItem) }
+                    )
+                }
+            }
+
+            // FAST TACTILE SCROLL DRAG BAR FOR ALBUMS DETAIL FEED AS WELL!
+            if (album.items.size > 8) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(32.dp)
+                        .align(Alignment.CenterEnd)
+                ) {
+                    val containerHeightPx = constraints.maxHeight.toFloat()
+                    
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(album.items) {
+                                detectDragGestures(
+                                    onDragStart = { offset ->
+                                        vibrate(view)
+                                        val index = calculateScrollIndex(offset.y, containerHeightPx, album.items.size)
+                                        if (index in album.items.indices) {
+                                            scrollScope.launch { lazyGridState.scrollToItem(index) }
+                                        }
+                                    },
+                                    onDrag = { change, _ ->
+                                        val index = calculateScrollIndex(change.position.y, containerHeightPx, album.items.size)
+                                        if (index in album.items.indices && index != lastVibratedSectionIndex) {
+                                            lastVibratedSectionIndex = index
+                                            vibrate(view) // Emits mechanical haptic clicks during dragging!!
+                                            scrollScope.launch { lazyGridState.scrollToItem(index) }
+                                        }
+                                    }
+                                )
+                            }
+                    ) {
+                        // Modern minimalist slim scroll line
+                        Box(
+                            modifier = Modifier
+                                .width(1.5.dp)
+                                .fillMaxHeight(0.85f)
+                                .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(50))
+                                .align(Alignment.Center)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1052,6 +1613,7 @@ fun MediaImmersiveViewer(
     val pagerState = rememberPagerState(initialPage = startIndex, pageCount = { pageCount })
     var showOverlays by remember { mutableStateOf(true) }
     var showDeleteConfirm by remember { mutableStateOf<MediaItem?>(null) }
+    var showDetailsSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(pagerState.currentPage) {
         vibrate(view)
@@ -1179,6 +1741,20 @@ fun MediaImmersiveViewer(
                                 Icon(
                                     imageVector = Icons.Default.Share,
                                     contentDescription = "Share image or video",
+                                    tint = Color.White
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    vibrate(view)
+                                    showDetailsSheet = true
+                                },
+                                modifier = Modifier.testTag("viewer_details_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = "Show details of image or video",
                                     tint = Color.White
                                 )
                             }
@@ -1360,6 +1936,125 @@ fun MediaImmersiveViewer(
                 }
             }
         }
+
+        // Details dialog overlay
+        AnimatedVisibility(
+            visible = showDetailsSheet,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.70f))
+                    .clickable { showDetailsSheet = false },
+                contentAlignment = Alignment.Center
+            ) {
+                val item = mediaList.getOrNull(pagerState.currentPage)
+                if (item != null) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth(0.85f)
+                            .clickable(enabled = false) {}, // consume clicks
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "FILE DETAILS",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 2.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                IconButton(onClick = { showDetailsSheet = false }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Close details",
+                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+
+                            androidx.compose.material3.HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                                thickness = 0.8.dp,
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+
+                            // Properties
+                            DetailField(label = "Name", value = item.name)
+                            DetailField(label = "Type", value = if (item.isVideo) "Video (MP4)" else "Image (JPEG)")
+                            
+                            val readableDate = remember(item.dateAdded) {
+                                val formatter = SimpleDateFormat("dd MMMM yyyy, h:mm:ss a", Locale.getDefault())
+                                formatter.format(Date(item.dateAdded))
+                            }
+                            DetailField(label = "Date added", value = readableDate)
+                            
+                            if (item.size > 0L) {
+                                DetailField(label = "File size", value = formatSize(item.size))
+                            }
+                            
+                            DetailField(label = "Folder Location", value = item.folderName)
+                            DetailField(label = "Data source", value = item.uri, maxLines = 2)
+
+                            Spacer(modifier = Modifier.height(20.dp))
+
+                            Button(
+                                onClick = {
+                                    vibrate(view)
+                                    showDetailsSheet = false
+                                },
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                            ) {
+                                Text("DONE", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailField(label: String, value: String, maxLines: Int = 1) {
+    Column(modifier = Modifier.padding(vertical = 5.dp)) {
+        Text(
+            text = label.uppercase(),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = value,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Normal,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

@@ -23,6 +23,7 @@ import kotlinx.coroutines.withContext
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val context: Context get() = getApplication()
+    private val prefs = context.getSharedPreferences("memories_prefs", Context.MODE_PRIVATE)
 
     // UI state states
     val isDarkMode = MutableStateFlow(true) // dark mode by default for premium look
@@ -30,6 +31,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     val favoriteIds = MutableStateFlow<Set<String>>(emptySet())
     val deletedIds = MutableStateFlow<Set<String>>(emptySet())
+    val virtualAlbums = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
+
+    // Selection State management
+    val isSelectionMode = MutableStateFlow(false)
+    val selectedIds = MutableStateFlow<Set<String>>(emptySet())
 
     private val _hasPermission = MutableStateFlow(false)
     val hasPermission: StateFlow<Boolean> = _hasPermission
@@ -41,6 +47,22 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     val showSamplesOnly = MutableStateFlow(false)
 
     init {
+        // Load persistent sets from SharedPreferences
+        val favs = prefs.getStringSet("favorite_ids", emptySet()) ?: emptySet()
+        favoriteIds.value = favs.toSet()
+
+        val dels = prefs.getStringSet("deleted_ids", emptySet()) ?: emptySet()
+        deletedIds.value = dels.toSet()
+
+        // Load virtual albums mapping: name -> item IDs
+        val albumNames = prefs.getStringSet("virtual_album_names", emptySet()) ?: emptySet()
+        val loadedVirtual = HashMap<String, Set<String>>()
+        albumNames.forEach { name ->
+            val ids = prefs.getStringSet("virtual_album_items_$name", emptySet()) ?: emptySet()
+            loadedVirtual[name] = ids
+        }
+        virtualAlbums.value = loadedVirtual
+
         checkPermissionState()
     }
 
@@ -82,15 +104,58 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun toggleFavorite(itemId: String) {
         val current = favoriteIds.value
-        if (current.contains(itemId)) {
-            favoriteIds.value = current - itemId
-        } else {
-            favoriteIds.value = current + itemId
-        }
+        val next = if (current.contains(itemId)) current - itemId else current + itemId
+        favoriteIds.value = next
+        prefs.edit().putStringSet("favorite_ids", next).apply()
     }
 
     fun deleteMedia(itemId: String) {
-        deletedIds.value = deletedIds.value + itemId
+        val next = deletedIds.value + itemId
+        deletedIds.value = next
+        prefs.edit().putStringSet("deleted_ids", next).apply()
+    }
+
+    // Batch delete selected media items
+    fun deleteSelectedMedia(itemIds: Set<String>) {
+        val next = deletedIds.value + itemIds
+        deletedIds.value = next
+        prefs.edit().putStringSet("deleted_ids", next).apply()
+        clearSelection()
+    }
+
+    // Virtual album creation
+    fun createVirtualAlbum(name: String, itemIds: Set<String>) {
+        val current = virtualAlbums.value.toMutableMap()
+        val existing = current[name] ?: emptySet()
+        current[name] = existing + itemIds
+        virtualAlbums.value = current
+
+        // Persist to preferences
+        val albumNames = current.keys
+        prefs.edit()
+            .putStringSet("virtual_album_names", albumNames)
+            .putStringSet("virtual_album_items_$name", current[name])
+            .apply()
+        
+        clearSelection()
+    }
+
+    // Selection toggle functions
+    fun toggleSelection(itemId: String) {
+        val current = selectedIds.value
+        val next = if (current.contains(itemId)) current - itemId else current + itemId
+        selectedIds.value = next
+        isSelectionMode.value = next.isNotEmpty()
+    }
+
+    fun enterSelectionMode(firstItemId: String) {
+        selectedIds.value = setOf(firstItemId)
+        isSelectionMode.value = true
+    }
+
+    fun clearSelection() {
+        selectedIds.value = emptySet()
+        isSelectionMode.value = false
     }
 
     // Expose final sorted list of media items
@@ -98,21 +163,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _localMediaItems,
         showSamplesOnly,
         _hasPermission,
-        deletedIds
-    ) { localItems, forceShowSamples, isPermitted, deleted ->
-        val rawList = if (forceShowSamples || !isPermitted || localItems.isEmpty()) {
+        deletedIds,
+        isLoading
+    ) { localItems, forceShowSamples, isPermitted, deleted, loading ->
+        val rawList = if (forceShowSamples || !isPermitted) {
+            SampleMedia.getSamples().sortedByDescending { it.dateAdded }
+        } else if (loading && localItems.isEmpty()) {
+            emptyList()
+        } else if (localItems.isEmpty()) {
+            // Only fall back to samples when completely empty and not loading anymore
             SampleMedia.getSamples().sortedByDescending { it.dateAdded }
         } else {
             localItems.sortedByDescending { it.dateAdded }
         }
         rawList.filter { it.id !in deleted }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, SampleMedia.getSamples())
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    // Convert flat list of MediaItems into Album folders
+    // Convert flat list of MediaItems into Album folders including custom/virtual ones
     val albums: StateFlow<List<Album>> = combine(
         mediaItems,
-        favoriteIds
-    ) { items, favIds ->
+        favoriteIds,
+        virtualAlbums
+    ) { items, favIds, vAlbums ->
         val groups = items.groupBy { it.folderName }
         val albumList = ArrayList<Album>()
 
@@ -143,8 +215,24 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             )
         }
 
+        // Incorporate custom User-Created Virtual Albums
+        vAlbums.forEach { (name, ids) ->
+            val vItems = items.filter { it.id in ids }.sortedByDescending { it.dateAdded }
+            if (vItems.isNotEmpty()) {
+                albumList.add(
+                    Album(
+                        name = name,
+                        coverUri = vItems.first().uri,
+                        isVideoCover = vItems.first().isVideo,
+                        itemsCount = vItems.size,
+                        items = vItems
+                    )
+                )
+            }
+        }
+
         groups.forEach { (name, groupItems) ->
-            if (name != "All Photos" && name != "Favorites") {
+            if (name != "All Photos" && name != "Favorites" && !vAlbums.containsKey(name)) {
                 albumList.add(
                     Album(
                         name = name,
@@ -159,7 +247,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
         // Put "Videos" album next if there are videos
         val videoItems = items.filter { it.isVideo }
-        if (videoItems.isNotEmpty() && !groups.containsKey("Videos")) {
+        if (videoItems.isNotEmpty() && !groups.containsKey("Videos") && !vAlbums.containsKey("Videos")) {
             albumList.add(
                 if (favItems.isNotEmpty()) 2 else 1,
                 Album(

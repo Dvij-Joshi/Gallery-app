@@ -6,8 +6,11 @@ import android.view.View
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
@@ -95,47 +98,72 @@ fun PinchZoomImage(
                 )
             }
             .pointerInput(Unit) {
-                // Multi-finger zoom/panning & swipe-down-to-dismiss gestures
-                detectTransformGestures { _, pan, zoom, _ ->
-                    coroutineScope.launch {
-                        // 1. Calculate active scale update
-                        val newScale = (scale.value * zoom).coerceIn(0.5f, 5.0f)
-                        scale.snapTo(newScale)
+                // Multi-finger zoom/panning & swipe-down-to-dismiss gestures with horizontal pager bypass
+                awaitEachGesture {
+                    val firstDown = awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val canceled = event.changes.any { it.isConsumed }
+                        if (!canceled) {
+                            val pointerCount = event.changes.size
+                            val currentScaleVal = scale.value
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
 
-                        // 2. Gesture zooming/panning calculations
-                        if (newScale > 1.01f) {
-                            isSwipingDown = false
-                            // Pan relative to scale factors
-                            val newX = offsetX.value + pan.x * scale.value
-                            val newY = offsetY.value + pan.y * scale.value
-                            
-                            // Visual bound restrictions (prevent infinitely dragging ofscreen)
-                            val maxPanX = size.width * (newScale - 1f) / 2f
-                            val maxPanY = size.height * (newScale - 1f) / 2f
-                            
-                            offsetX.snapTo(newX.coerceIn(-maxPanX, maxPanX))
-                            offsetY.snapTo(newY.coerceIn(-maxPanY, maxPanY))
-                        } else {
-                            // 3. Swipe down to dismiss gesture (when scale is normal/default)
-                            if (pan.y > 0 || isSwipingDown) {
-                                isSwipingDown = true
-                                val dragY = offsetY.value + pan.y
-                                offsetY.snapTo(dragY)
-                                
-                                // Drag visual compression factor for background alpha fading
-                                dismissFraction = (dragY / 400.0f).coerceIn(0f, 1f)
-                                
-                                if (dragY > 450f) {
-                                    triggerHapticFeedback(view)
-                                    onDismiss()
+                            var shouldConsume = false
+
+                            if (currentScaleVal > 1.05f) {
+                                // Zoomed in: always handle pan and zoom, consume all
+                                shouldConsume = true
+                                val newScale = (currentScaleVal * zoomChange).coerceIn(0.5f, 5.0f)
+                                coroutineScope.launch {
+                                    launch { scale.snapTo(newScale) }
+                                    val newX = offsetX.value + panChange.x * scale.value
+                                    val newY = offsetY.value + panChange.y * scale.value
+                                    
+                                    val maxPanX = size.width * (newScale - 1f) / 2f
+                                    val maxPanY = size.height * (newScale - 1f) / 2f
+                                    
+                                    launch { offsetX.snapTo(newX.coerceIn(-maxPanX, maxPanX)) }
+                                    launch { offsetY.snapTo(newY.coerceIn(-maxPanY, maxPanY)) }
                                 }
                             } else {
-                                // Standard horizontal panning limits when bounds are normal
-                                val dragX = offsetX.value + pan.x
-                                offsetX.snapTo(dragX.coerceIn(-100f, 100f))
+                                // Zoomed out (baseline scale)
+                                if (pointerCount >= 2) {
+                                    // Two or more fingers: handle zoom/pinch
+                                    shouldConsume = true
+                                    val newScale = (currentScaleVal * zoomChange).coerceIn(0.5f, 5.0f)
+                                    coroutineScope.launch {
+                                        scale.snapTo(newScale)
+                                    }
+                                } else if (pointerCount == 1) {
+                                    // Single finger horizontal/vertical gesture check
+                                    if (isSwipingDown || (panChange.y > 0 && abs(panChange.y) > abs(panChange.x) * 1.5f && abs(panChange.y) > 4f)) {
+                                        // Vertical downward swipe to dismiss: consume and update
+                                        isSwipingDown = true
+                                        shouldConsume = true
+                                        coroutineScope.launch {
+                                            val dragY = offsetY.value + panChange.y
+                                            offsetY.snapTo(dragY)
+                                            dismissFraction = (dragY / 400.0f).coerceIn(0f, 1f)
+                                            if (dragY > 450f) {
+                                                triggerHapticFeedback(view)
+                                                onDismiss()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (shouldConsume) {
+                                event.changes.forEach {
+                                    if (it.previousPosition != it.position) {
+                                        it.consume()
+                                    }
+                                }
                             }
                         }
-                    }
+                    } while (event.changes.any { it.pressed })
                 }
             }
             .pointerInput(Unit) {

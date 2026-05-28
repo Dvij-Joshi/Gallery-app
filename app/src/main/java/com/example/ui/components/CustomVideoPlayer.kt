@@ -121,6 +121,11 @@ fun CustomVideoPlayer(
                     )
                     setVideoPath(videoUri)
                     
+                    // Make it completely non-consuming for touches to let HorizontalPager swipe gestures work
+                    isClickable = false
+                    isLongClickable = false
+                    setOnTouchListener { _, _ -> false }
+                    
                     setOnPreparedListener { mp ->
                         mediaPlayerInstance = mp
                         // Setup loop or fits
